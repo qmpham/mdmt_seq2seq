@@ -1,6 +1,6 @@
 # mdmt_seq2seq
 Dependencies:
-OpenNMT-tf 2.1.1
-Tensorflow 2.1
-Pyyaml
-Python 3.x
+OpenNMT-tf 2.1.1 <br />
+Tensorflow 2.1 <br />
+Pyyaml <br />
+Python 3.x <br />
