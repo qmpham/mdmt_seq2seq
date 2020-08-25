@@ -1,3 +1,6 @@
+import sys
+sys.path.append("/gpfsdswork/projects/rech/sfz/utt84zy/anaconda3/envs/huggingface/lib/python3.7/site-packages")
+
 import tensorflow as tf
 import numpy as np
 import subprocess
@@ -5,6 +8,7 @@ import io
 import re
 import os
 import six
+import json
 def make_domain_mask(num_domains, num_units, num_domain_units=8, dtype=tf.float32):
   print("num_domains", num_domains)
   print("num_units", num_units)
@@ -93,14 +97,17 @@ def load_and_update_if_needed_from_ckpt(model_dir,
     if not path.startswith(model_key) or ".OPTIMIZER_SLOT" in path:
       continue
     variable_path = path.replace("/.ATTRIBUTES/VARIABLE_VALUE", "")
+    #print(variable_path)
     variable = variable_which(trackables, variable_path)
     value = reader.get_tensor(path)
     if variable:
       if "_domain_classification" in variable.name:
         continue
+      elif "ADAP" in variable.name:
+        continue
       elif vocab_update and "_embedding" in variable.name:
-        print("vocab_update", vocab_update)
-        print(variable.name)
+        #print("vocab_update", vocab_update)
+        #print(variable.name)
         new_value = np.concatenate((value, np.zeros((1,512))),axis=0)
         variable.assign(new_value)
       elif vocab_update and "dense_96/bias" in variable.name:
@@ -112,7 +119,8 @@ def load_and_update_if_needed_from_ckpt(model_dir,
         new_value = np.concatenate((value, np.zeros((512,1))),axis=1)
         variable.assign(new_value)
       else:
-        print(variable.name)
+        #print(variable.name)
+        #print(value)
         variable.assign(value)
 
 def average_checkpoints(model_dir,
@@ -210,5 +218,33 @@ def variable_which(structure, path):
       raise ValueError("Invalid path in structure: %s" % path)
   return structure
 
-
+def create_slurm_strategy():
+  SLURM_VARIABLES = [
+            'SLURM_JOB_ID',
+            'SLURM_JOB_NODELIST', 'SLURM_JOB_NUM_NODES', 'SLURM_NTASKS', 'SLURM_TASKS_PER_NODE',
+            'SLURM_NODEID', 'SLURM_PROCID', 'SLURM_LOCALID', 'SLURM_TASK_PID']
+  print(" ".join(["%s: %s"%(v, os.environ[v]) for v in SLURM_VARIABLES]))
+  hostnames = subprocess.check_output(['scontrol', 'show', 'hostnames', os.environ['SLURM_JOB_NODELIST']])
+  print("hostnames: %s"%hostnames)
+  master_addr = hostnames.split()[0].decode('utf-8')
+  print("master_addr: %s"%master_addr)
+  port=12345
+  host_addrs = []
+  ntasks = int(os.environ["SLURM_NTASKS"])
+  nnodes = int(os.environ["SLURM_JOB_NUM_NODES"])
+  for name in hostnames.split():
+    name = name.decode('utf-8')
+    for i in range(ntasks//nnodes):
+      host_addrs.append("%s:%d"%(name, port+i))
+  os.environ['TF_CONFIG'] = json.dumps({
+    'cluster': {
+        'worker': host_addrs
+    },
+    'task': {'type': 'worker', 'index': os.environ["SLURM_PROCID"]}
+  })
+  #jobs = {"worker": 2}
+  #strategy = tf.distribute.experimental.ParameterServerStrategy(cluster_resolver=tf.distribute.cluster_resolver.SlurmClusterResolver(jobs, gpus_per_node=4, gpus_per_task=1))
+  #strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy(communication=tf.distribute.experimental.CollectiveCommunication.NCCL,cluster_resolver=tf.distribute.cluster_resolver.SlurmClusterResolver(jobs, gpus_per_node=4, gpus_per_task=4))
+  strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
+  return strategy
   

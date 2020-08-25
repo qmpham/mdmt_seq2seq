@@ -1,4 +1,6 @@
 """Defines common layers."""
+import sys
+sys.path.append("/gpfsdswork/projects/rech/sfz/utt84zy/anaconda3/envs/huggingface/lib/python3.7/site-packages")
 
 import tensorflow as tf
 import numpy as np
@@ -187,7 +189,7 @@ class LayerWrapper(tf.keras.layers.Layer):
     training = kwargs.get("training")
     x = inputs
     if self.input_layer_norm is not None:
-      x = self.input_layer_norm(x)  # pylint: disable=not-callable
+      x = self.input_layer_norm.forward_fn(x, args_dict)  # pylint: disable=not-callable
     x = dropout(x, self.input_dropout, training=training)
 
     all_outputs = self.layer.forward_fn(x, args_dict, *args, **kwargs)
@@ -202,7 +204,7 @@ class LayerWrapper(tf.keras.layers.Layer):
     if self.residual_connection and outputs.shape[-1] == inputs.shape[-1]:
       outputs += inputs
     if self.output_layer_norm is not None:
-      outputs = self.output_layer_norm(outputs)  # pylint: disable=not-callable
+      outputs = self.output_layer_norm.forward_fn(outputs, args_dict)  # pylint: disable=not-callable
 
     if extra_outputs:
       return tuple([outputs] + extra_outputs)
@@ -331,18 +333,16 @@ class Multi_ADAP_Dense_v1(tf.keras.layers.Dense):
 
 class Multi_LayerNorm(tf.keras.layers.Layer):
   
-  def __init__(self, domain_numb, input_dims, epsilon=1e-6, **kwargs):
+  def __init__(self, domain_numb, epsilon=1e-6, **kwargs):
     
     super(Multi_LayerNorm, self).__init__(**kwargs)
     self.epsilon = epsilon
-    self.input_dims = tf.constant(input_dims)
-    self.input_dims_max = 1024
     self.domain_numb = domain_numb
 
   def build(self, input_shape):
     """Creates the variables."""
-    #depth = input_shape[-1]
-    depth = self.input_dims_max
+    depth = input_shape[-1]
+    #depth = self.input_dims_max
     self.beta = self.add_weight(
         "beta", [self.domain_numb, depth], initializer=tf.keras.initializers.Constant(0))
     self.gamma = self.add_weight(
@@ -354,9 +354,8 @@ class Multi_LayerNorm(tf.keras.layers.Layer):
     mean = tf.reduce_mean(x, axis=[-1], keepdims=True)
     variance = tf.reduce_mean(tf.square(x - mean), axis=[-1], keepdims=True)
     norm_x = (x - mean) * tf.math.rsqrt(variance + self.epsilon)
-    dims = self.input_dims[domain]
-    gamma = tf.nn.embedding_lookup(self.gamma, domain)[:dims]
-    beta = tf.nn.embedding_lookup(self.beta, domain)[:dims]
+    gamma = tf.nn.embedding_lookup(self.gamma, domain)
+    beta = tf.nn.embedding_lookup(self.beta, domain)
     return norm_x * gamma + beta
 
   def forward_fn(self, x, args_dict, domain):  # pylint: disable=arguments-differ

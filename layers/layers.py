@@ -1,3 +1,6 @@
+import sys
+sys.path.append("/gpfsdswork/projects/rech/sfz/utt84zy/anaconda3/envs/huggingface/lib/python3.7/site-packages")
+
 import tensorflow as tf
 import numpy as np
 from layers import common
@@ -6,6 +9,7 @@ from opennmt.utils.misc import shape_list
 import sys
 from opennmt.layers.rnn import _RNNWrapper
 from opennmt.layers import reducer as reducer_lib
+from opennmt.utils.losses import _smooth_one_hot_labels
 
 
 class Classification_layer(tf.keras.layers.Layer):
@@ -21,8 +25,8 @@ class Classification_layer(tf.keras.layers.Layer):
     self.input_dim = input_dim
     self.layer_norm = common.LayerNorm()
     self.kernel_size = kernel_size
-    #self.ff_layer_1 = common.Dense(2048, use_bias=True, activation=tf.nn.relu)
-    #self.ff_layer_2 = common.Dense(2048, use_bias=True, activation=tf.nn.relu)
+    self.ff_layer_1 = common.Dense(2048, use_bias=True, activation=tf.nn.relu)
+    self.ff_layer_2 = common.Dense(2048, use_bias=True, activation=tf.nn.relu)
     self.ff_layer_end = common.Dense(domain_numb, use_bias=True, activation=tf.nn.tanh)
 
   def build(self, input_shape):
@@ -49,10 +53,10 @@ class Classification_layer(tf.keras.layers.Layer):
     e = tf.matmul(attention_weight, inputs)
     e = tf.squeeze(e,1)
     e = common.dropout(e, rate=0.3, training=training)
-    #logits = self.ff_layer_1(tf.nn.relu(e))          
-    #logits = common.dropout(logits, rate=0.3, training=training)
-    #logits = self.ff_layer_2(logits)
-    #logits = common.dropout(logits, rate=0.3, training=training)
+    logits = self.ff_layer_1(tf.nn.relu(e))          
+    logits = common.dropout(logits, rate=0.3, training=training)
+    logits = self.ff_layer_2(logits)
+    logits = common.dropout(logits, rate=0.3, training=training)
     logits = self.ff_layer_end(tf.nn.relu(e))
     return e, logits
   
@@ -228,6 +232,7 @@ class Multi_domain_FeedForwardNetwork_v3(tf.keras.layers.Layer):
                domain_numb=6,
                dropout=0.1,
                activation=tf.nn.relu,
+               inner_layer_norm=None,
                outer_activation=None,
                **kwargs):
     
@@ -237,8 +242,13 @@ class Multi_domain_FeedForwardNetwork_v3(tf.keras.layers.Layer):
     self.input_dim = input_dim
     self.inner_dim = inner_dim
     self.output_dim = output_dim
-    self.layer_norm = common.LayerNorm()
-    self.inner_layer_norm = common.LayerNorm()
+    
+    if inner_layer_norm:
+      self.layer_norm = inner_layer_norm(domain_numb)
+      self.inner_layer_norm = inner_layer_norm(domain_numb)
+    else:
+      self.layer_norm = common.LayerNorm()
+      self.inner_layer_norm = common.LayerNorm()
     self.inner_transpose = False
     self.outer_transpose = False
     self.inner_use_bias = True
@@ -260,7 +270,11 @@ class Multi_domain_FeedForwardNetwork_v3(tf.keras.layers.Layer):
     if not(mask is None):
       mask=tf.cast(mask,tf.float32)
     mask=None
-    inputs = self.layer_norm(inputs)
+
+    if isinstance(self.layer_norm, common.LayerNorm):
+      inputs = self.layer_norm(inputs)
+    else:
+      inputs = self.layer_norm(inputs, domain)
     ##### inner layer
     shape = shape_list(inputs)
     rank = len(shape)      
@@ -273,7 +287,10 @@ class Multi_domain_FeedForwardNetwork_v3(tf.keras.layers.Layer):
     if self.inner_use_bias:
       inner = tf.nn.bias_add(inner, dom_inner_bias)
     if self.inner_activation is not None:
-      inner = self.inner_layer_norm(inner)
+      if isinstance(self.inner_layer_norm, common.LayerNorm):
+        inner = self.inner_layer_norm(inner)
+      else:
+        inner = self.inner_layer_norm(inner,domain)
       inner = self.inner_activation(inner)  # pylint: disable=not-callable
     if rank > 2:
       inner = tf.reshape(inner, shape[:-1] + [self.inner_dim])
@@ -291,10 +308,11 @@ class Multi_domain_FeedForwardNetwork_v3(tf.keras.layers.Layer):
       outputs = tf.nn.bias_add(outputs, dom_outer_bias)
     if self.outer_activation is not None:
       outputs = self.outer_activation(outputs)  # pylint: disable=not-callable
-    if mask is not None:
-      self.add_loss(tf.divide(tf.reduce_sum(mask * tf.reduce_sum(tf.abs(outputs),axis=-1)), tf.reduce_sum(mask)))
-    else:
-      self.add_loss(tf.reduce_mean(tf.reduce_sum(tf.abs(outputs),axis=-1)))
+    if training:
+      if mask is not None:
+        self.add_loss(tf.divide(tf.reduce_sum(mask * tf.reduce_sum(tf.abs(outputs),axis=-1)), tf.reduce_sum(mask)))
+      else:
+        self.add_loss(tf.reduce_mean(tf.reduce_sum(tf.abs(outputs),axis=-1)))
     if rank > 2:
       outputs = tf.reshape(outputs, shape[:-1] + [self.output_dim])   
     
@@ -756,8 +774,8 @@ class Multi_domain_Gate(tf.keras.layers.Layer):
   def build(self, input_shape):
     super(Multi_domain_Gate, self).build(input_shape)
     scope_name = self.name_scope()
-    self.outer_kernel = self.add_weight("%s_outer_weight"%scope_name, shape=[self.domain_numb, self.input_dim*self.output_dim])
-    self.outer_bias = self.add_weight("%s_outer_bias"%scope_name, shape=[self.domain_numb, self.output_dim])
+    self.outer_kernel = self.add_weight("%s_outer_weight"%scope_name, shape=[self.domain_numb, self.input_dim*self.output_dim], initializer=tf.zeros_initializer)
+    self.outer_bias = self.add_weight("%s_outer_bias"%scope_name, shape=[self.domain_numb, self.output_dim], initializer=tf.zeros_initializer)
     
   def call(self, inputs, domain, mask=None, training=None):  # pylint: disable=arguments-differ
     """Runs the layer."""
@@ -1596,6 +1614,163 @@ class Multi_domain_FeedForwardNetwork_v8(tf.keras.layers.Layer):
     
     if rank > 2:
       outputs = tf.reshape(outputs, shape[:-1] + [self.output_dim]) 
+
+    return outputs
+
+class Multi_domain_FeedForwardNetwork_v9(tf.keras.layers.Layer):
+
+  def __init__(self,
+               input_dim, 
+               inner_dim,
+               output_dim,
+               domain_numb=6,
+               dropout=0.1,
+               activation=tf.nn.relu,
+               inner_layer_norm=None,
+               outer_activation=None,
+               **kwargs):
+    
+    super(Multi_domain_FeedForwardNetwork_v9, self).__init__(**kwargs)
+    self.dropout = dropout
+    self.domain_numb = domain_numb
+    self.input_dim = input_dim
+    self.inner_dim = inner_dim
+    self.output_dim = output_dim
+    self.layer_norm = common.LayerNorm()
+    if inner_layer_norm:
+      self.inner_layer_norm = inner_layer_norm(domain_numb)
+    else:
+      self.inner_layer_norm = common.LayerNorm()
+    self.inner_transpose = False
+    self.outer_transpose = False
+    self.inner_use_bias = True
+    self.outer_use_bias = True
+    self.inner_activation = activation
+    self.outer_activation = outer_activation
+  
+  def build(self, input_shape):
+    super(Multi_domain_FeedForwardNetwork_v9, self).build(input_shape)
+    scope_name = self.name_scope()
+    #print("self.domain_numb, self.input_dim, self.inner_dim: ", self.domain_numb, self.input_dim, self.inner_dim)
+    self.inner_kernel = self.add_weight("%s_inner_weight"%scope_name, shape=[self.input_dim, self.domain_numb * self.inner_dim])
+    self.inner_bias = self.add_weight("%s_inner_bias"%scope_name, shape=[self.domain_numb * self.inner_dim])
+    self.outer_kernel = self.add_weight("%s_outer_weight"%scope_name, shape=[self.domain_numb, self.inner_dim , self.output_dim])
+    self.outer_bias = self.add_weight("%s_outer_bias"%scope_name, shape=[self.domain_numb, self.output_dim])
+    
+  def call(self, inputs, domain, mask=None, training=None):  # pylint: disable=arguments-differ
+    """Runs the layer."""
+    if not(mask is None):
+      mask=tf.cast(mask,tf.float32)
+    mask=None
+    inputs = self.layer_norm(inputs)
+    ##### inner layer
+    shape = shape_list(inputs)
+    rank = len(shape)      
+    if rank > 2:
+      inputs = tf.reshape(inputs, [-1, shape[-1]])
+    inner = tf.matmul(inputs, self.inner_kernel, transpose_b=self.inner_transpose)
+    if self.inner_use_bias:
+      inner = tf.nn.bias_add(inner, self.inner_bias)
+    if self.inner_activation is not None:
+      inner = tf.reshape(inner, [-1, self.inner_dim])
+      inner = self.inner_layer_norm(inner)
+      inner = tf.reshape(inner, [-1, self.inner_dim * self.domain_numb])
+      inner = self.inner_activation(inner)  # pylint: disable=not-callable
+    if rank > 2:
+      inner = tf.reshape(inner, shape[:-1] + [self.inner_dim * self.domain_numb])
+    ##### output layer
+    inner = common.dropout(inner, self.dropout, training=training)
+    shape = shape_list(inner)
+    rank = len(shape)      
+    if rank > 2:
+      inner = tf.reshape(inner, [-1, shape[-1]])
+    inner = tf.transpose(inner)
+    inner = tf.reshape(inner,[self.domain_numb, self.inner_dim, -1])
+    @tf.function
+    def my_map(*args, **kwargs):
+      return tf.map_fn(*args, **kwargs)
+    #outputs = my_map(lambda x: tf.transpose(tf.nn.bias_add(tf.matmul(tf.transpose(x[0]), x[1] , transpose_b=self.outer_transpose), x[2])), (inner, self.outer_kernel, self.outer_bias), dtype=tf.float32, parallel_iterations=self.domain_numb)
+    #######
+    #tf.print("before_domain_mixing: ", tf.shape(outputs))
+    domain = tf.transpose(domain)
+    outputs = my_map(lambda x: tf.transpose(tf.nn.bias_add(tf.matmul(tf.transpose(x[0]), x[1] , transpose_b=self.outer_transpose), x[2])) * tf.tile(tf.reshape(tf.tile(tf.expand_dims(x[3],0),[tf.shape(x[0])[1]//tf.shape(domain)[1],1]),[1,-1]),[self.output_dim,1]), (inner, self.outer_kernel, self.outer_bias, domain), dtype=tf.float32, parallel_iterations=self.domain_numb)
+    #outputs = my_map(lambda x: x[0] * tf.tile(tf.reshape(tf.tile(tf.expand_dims(x[1],0),[tf.shape(x[0])[1]//tf.shape(domain)[1],1]),[1,-1]),[self.output_dim,1]), (outputs, domain), dtype=tf.float32, parallel_iterations=self.domain_numb)
+    #tf.print("after_domain_mixing: ", tf.shape(outputs))
+    outputs = tf.transpose(tf.reduce_sum(outputs,0))
+    #######
+    """
+    outputs = tf.reshape(outputs, [self.domain_numb * self.output_dim, -1])
+    outputs = tf.transpose(outputs)
+    outputs = tf.reshape(outputs,[tf.shape(domain)[0], -1, self.domain_numb * self.output_dim])
+    outputs = my_map(lambda x: tf.reduce_sum(tf.reshape(x[0] * tf.tile(tf.reshape(tf.transpose(tf.tile(tf.expand_dims(x[1],0),[self.output_dim,1])),[1,-1]),[tf.shape(x[0])[0],1]), [-1, self.domain_numb, self.output_dim]),1), (outputs, domain), dtype=tf.float32, parallel_iterations=0)
+    """
+    if mask is not None:
+      self.add_loss(tf.divide(tf.reduce_sum(mask * tf.reduce_sum(tf.abs(outputs),axis=-1)), tf.reduce_sum(mask)))
+    else:
+      self.add_loss(tf.reduce_mean(tf.reduce_sum(tf.abs(outputs),axis=-1)))
+
+    if rank > 2:
+      outputs = tf.reshape(outputs, shape[:-1] + [self.output_dim])   
+    # if not training:
+    #   tf.print("###", self.name_scope(), "Inputs_max_abs_pooling: ", tf.reduce_max(tf.abs(inputs)), "ADAP_max_abs_pooling: ", 
+    #             tf.reduce_max(tf.abs(outputs)), "ADAP_min_abs_pooling: ", tf.reduce_min(tf.abs(outputs)), "domain: ", domain, "###", sep="|")    
+    return outputs
+
+class Multi_domain_classification_gate(tf.keras.layers.Layer):
+
+  def __init__(self,
+               input_dim, 
+               num_units,
+               domain_numb=6,
+               dropout=0.1,
+               activation=tf.nn.sigmoid,
+               outer_activation=None,
+               **kwargs):
+    
+    super(Multi_domain_classification_gate, self).__init__(**kwargs)
+    self.dropout = dropout
+    self.domain_numb = domain_numb
+    self.layer_norm = common.LayerNorm()
+    self.inner_layer_norm = common.LayerNorm()
+    self.output_dim = num_units
+    self.outer_transpose = False
+    self.outer_use_bias = True
+    self.outer_activation = activation
+    self.ff_layer_1 = common.Dense(2048, use_bias=True, activation=tf.nn.relu, kernel_regularizer=tf.keras.regularizers.l2(0.001), bias_regularizer=tf.keras.regularizers.l2(0.001))
+    self.ff_layer_2 = common.Dense(2048, use_bias=True, activation=tf.nn.relu, kernel_regularizer=tf.keras.regularizers.l2(0.001), bias_regularizer=tf.keras.regularizers.l2(0.001))
+    self.ff_layer_end = common.Dense(domain_numb, use_bias=True, kernel_initializer='zeros', bias_initializer='zeros', kernel_regularizer=tf.keras.regularizers.l2(0.001), bias_regularizer=tf.keras.regularizers.l2(0.001))
+  
+  def build(self, input_shape):
+    super(Multi_domain_classification_gate, self).build(input_shape)
+    
+  def call(self, inputs, domain, mask=None, training=None):  # pylint: disable=arguments-differ
+    """Runs the layer."""
+    shape = shape_list(inputs)
+    rank = len(shape)      
+    if rank > 2:
+      inputs = tf.reshape(inputs, [-1, shape[-1]])
+    inputs = self.layer_norm(inputs)
+    inputs = common.dropout(inputs, rate=0.3, training=training)
+    logits = self.ff_layer_1(inputs)
+    #tf.print("logits 1", logits)
+    logits = common.dropout(logits, rate=0.3, training=training)
+    logits = self.ff_layer_2(logits)
+    #tf.print("logits 2", logits)
+    logits = common.dropout(logits, rate=0.3, training=training)
+    logits = self.ff_layer_end(logits)
+    #tf.print("logits 3: ", logits, summarize=1000)
+    #tf.print("%s outputs: "%(self.name_scope()), tf.math.softmax(logits),summarize=1000)
+    outputs = tf.math.softmax(logits)[:,domain]
+    #tf.print("prediction loss", tf.nn.softmax_cross_entropy_with_logits(smoothed_labels, logits))
+    if training:
+      label_smoothing = 0.1
+      labels = tf.fill([tf.shape(logits)[0]], domain)
+      smoothed_labels = _smooth_one_hot_labels(logits, labels, label_smoothing)
+      self.add_loss(tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(smoothed_labels, logits)))
+
+    outputs = tf.tile(tf.expand_dims(outputs,1),[1,self.output_dim])
+    if rank > 2:
+      outputs = tf.reshape(outputs, shape[:-1] + [self.output_dim])   
 
     return outputs
 
